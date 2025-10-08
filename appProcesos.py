@@ -17,7 +17,7 @@ st.set_page_config(
 )
 
 st.title("Demand Forecasting Dashboard 📈📊")
-st.markdown("Compara 6 métodos de pronóstico, incluyendo Prophet con regresor de precio y 5 modelos de Suavizado Exponencial.")
+st.markdown("Compara 6 métodos de pronóstico, incluyendo Prophet con regresor de precio y 5 modelos de Suavizado Exponencial, con múltiples métricas de error.")
 
 # --- Funciones de Carga y Métrica ---
 
@@ -44,9 +44,6 @@ def load_data(file):
 
 def calculate_mape(actual, predicted):
     """Calcula el Mean Absolute Percentage Error (MAPE)."""
-    # Solo usa valores no nulos
-    
-    # Unir para asegurar alineación y filtrar nulos
     temp_df = pd.DataFrame({'actual': actual, 'predicted': predicted}).dropna()
     actual = temp_df['actual'].values
     predicted = temp_df['predicted'].values
@@ -60,17 +57,65 @@ def calculate_mape(actual, predicted):
     mape = np.mean(np.abs((actual - predicted) / actual)) * 100
     return mape
 
+def calculate_mad_mae(actual, predicted):
+    """Calcula el Mean Absolute Deviation (MAD) o Mean Absolute Error (MAE)."""
+    temp_df = pd.DataFrame({'actual': actual, 'predicted': predicted}).dropna()
+    actual = temp_df['actual'].values
+    predicted = temp_df['predicted'].values
+    
+    if len(actual) == 0:
+        return np.nan
+        
+    mad = np.mean(np.abs(actual - predicted))
+    return mad
+
+def calculate_rmse(actual, predicted):
+    """Calcula el Root Mean Squared Error (RMSE)."""
+    temp_df = pd.DataFrame({'actual': actual, 'predicted': predicted}).dropna()
+    actual = temp_df['actual'].values
+    predicted = temp_df['predicted'].values
+    
+    if len(actual) == 0:
+        return np.nan
+        
+    rmse = np.sqrt(np.mean((actual - predicted)**2))
+    return rmse
+
+def calculate_tracking_signal(actual, predicted):
+    """Calcula el Tracking Signal (Señal de Rastreo)."""
+    
+    temp_df = pd.DataFrame({'actual': actual, 'predicted': predicted}).dropna()
+    
+    if len(temp_df) == 0:
+        return np.nan
+        
+    # Error de Pronóstico (FE)
+    errors = temp_df['actual'] - temp_df['predicted']
+    
+    # Suma Corriente de Errores de Pronóstico (RSFE)
+    rsfe = errors.sum()
+    
+    # Desviación Media Absoluta (MAD)
+    # Reutilizamos la función MAD, que es el promedio de los errores absolutos.
+    mad = calculate_mad_mae(actual, predicted)
+    
+    # Calcular Tracking Signal (TS = RSFE / MAD)
+    if mad == 0:
+        # Evitar división por cero. Si MAD es 0, el error es nulo.
+        return 0.0
+    
+    ts = rsfe / mad
+    return ts
+
 # --- Funciones de Modelado (Prophet y Statsmodels) ---
 
 def run_prophet(df_train, df_full, n_days, regressor_name):
-    """Ejecuta el modelo Prophet."""
+    """Ejecuta el modelo Prophet y devuelve todas las métricas de error."""
     try:
-        # Prophet requiere que ds sea datetime y y sea numérico
         df_prophet = df_train[['ds', 'y']].copy()
         
         m = Prophet(seasonality_mode='multiplicative', daily_seasonality=False)
         if regressor_name:
-            # Asegurarse de que el regresor esté en el df_prophet
             df_prophet[regressor_name] = df_train[regressor_name]
             m.add_regressor(regressor_name)
         
@@ -78,98 +123,106 @@ def run_prophet(df_train, df_full, n_days, regressor_name):
         
         future = m.make_future_dataframe(periods=n_days)
         
-        # Asignar el valor promedio del regresor a las fechas futuras
         if regressor_name:
-            # Usamos el promedio de la columna en el DataFrame completo
             future[regressor_name] = df_full[regressor_name].mean()
             
         forecast = m.predict(future)
         
         # Unir la predicción con los datos históricos para calcular el error
         df_join = df_prophet.merge(forecast[['ds', 'yhat']], on='ds', how='left')
-        mape = calculate_mape(df_join['y'], df_join['yhat'])
         
-        return forecast, mape
+        # CÁLCULO DE MÉTRICAS
+        actual = df_join['y']
+        predicted = df_join['yhat']
+        
+        metrics = {
+            'MAPE': calculate_mape(actual, predicted),
+            'MAD (MAE)': calculate_mad_mae(actual, predicted),
+            'RMSE': calculate_rmse(actual, predicted),
+            'Tracking Signal': calculate_tracking_signal(actual, predicted)
+        }
+        
+        return forecast, metrics
     except Exception as e:
-        return None, f"Error Prophet: {e}"
+        return None, {'MAPE': np.nan, 'MAD (MAE)': np.nan, 'RMSE': np.nan, 'Tracking Signal': f"Error: {e}"}
 
 def run_statsmodels(df_train, n_days, model_type, **kwargs):
-    """Ejecuta modelos de suavizado exponencial y promedio móvil."""
+    """Ejecuta modelos de suavizado exponencial y devuelve todas las métricas de error."""
+    
+    metrics = {'MAPE': np.nan, 'MAD (MAE)': np.nan, 'RMSE': np.nan, 'Tracking Signal': np.nan}
+    forecast_df = None
+    
     try:
         y_train = df_train.set_index('ds')['y']
         
         if model_type == 'Moving Average':
             window = kwargs.get('window', 7)
             
-            # Cálculo del error (MAPE) en la ventana de entrenamiento
             fit = y_train.rolling(window=window).mean()
-            mape = calculate_mape(y_train[window:], fit[window:])
             
-            # Predicción: el último valor del MA se extiende
+            # CÁLCULO DE MÉTRICAS (en la porción predicha del entrenamiento)
+            actual = y_train[window:]
+            predicted = fit[window:]
+            
+            # Predicción futura
             last_ma_value = fit.iloc[-1] if not fit.empty else y_train.mean()
             forecast_index = pd.date_range(start=df_train['ds'].max() + pd.Timedelta(days=1), periods=n_days, freq='D')
             forecast_values = np.full(n_days, last_ma_value)
-            
             forecast_df = pd.DataFrame({'ds': forecast_index, 'yhat': forecast_values})
             
-        elif model_type == 'SES': # Simple Exponential Smoothing
-            fit = SimpleExpSmoothing(y_train, initialization_method="estimated").fit(
-                smoothing_level=kwargs.get('alpha'), optimized=False
-            )
-            forecast = fit.predict(start=len(y_train), end=len(y_train) + n_days - 1)
-            mape = calculate_mape(y_train.values, fit.fittedvalues.values)
+        else: # SES, Holt, Winter
+            if model_type.startswith('Winter'):
+                seasonal_periods = kwargs.get('seasonal_periods', 7)
+                if len(y_train) < 2 * seasonal_periods:
+                     raise ValueError(f"Faltan datos. Se necesitan al menos {2 * seasonal_periods} días para estacionalidad.")
+            
+            if model_type == 'SES':
+                fit_model = SimpleExpSmoothing(y_train, initialization_method="estimated").fit(
+                    smoothing_level=kwargs.get('alpha'), optimized=False
+                )
+            elif model_type == 'Holt':
+                fit_model = Holt(y_train, initialization_method="estimated").fit(
+                    smoothing_level=kwargs.get('alpha'), smoothing_trend=kwargs.get('beta'), optimized=False
+                )
+            elif model_type == 'Winter_Add' or model_type == 'Winter_Mult':
+                seasonal_type = 'add' if model_type == 'Winter_Add' else 'mul'
+                fit_model = ExponentialSmoothing(
+                    y_train, seasonal_periods=seasonal_periods, trend=kwargs.get('trend_type'), seasonal=seasonal_type, 
+                    initialization_method="estimated"
+                ).fit(
+                    smoothing_level=kwargs.get('alpha'), smoothing_trend=kwargs.get('beta'), 
+                    smoothing_seasonal=kwargs.get('gamma'), optimized=False
+                )
+            
+            # CÁLCULO DE MÉTRICAS
+            actual = y_train.values
+            predicted = fit_model.fittedvalues.values
+            
+            # Predicción futura
+            forecast = fit_model.predict(start=len(y_train), end=len(y_train) + n_days - 1)
             forecast_df = pd.DataFrame({'ds': forecast.index, 'yhat': forecast.values})
 
-        elif model_type == 'Holt':
-            fit = Holt(y_train, initialization_method="estimated").fit(
-                smoothing_level=kwargs.get('alpha'), smoothing_trend=kwargs.get('beta'), optimized=False
-            )
-            forecast = fit.predict(start=len(y_train), end=len(y_train) + n_days - 1)
-            mape = calculate_mape(y_train.values, fit.fittedvalues.values)
-            forecast_df = pd.DataFrame({'ds': forecast.index, 'yhat': forecast.values})
-
-        elif model_type == 'Winter_Add' or model_type == 'Winter_Mult':
-            seasonal_periods = kwargs.get('seasonal_periods', 7)
-            seasonal_type = 'add' if model_type == 'Winter_Add' else 'mul'
-            trend_type = kwargs.get('trend_type')
-            
-            # Lanza una excepción si no hay suficientes datos para la estacionalidad
-            if len(y_train) < 2 * seasonal_periods:
-                 raise ValueError(f"Faltan datos. Se necesitan al menos {2 * seasonal_periods} días (2 ciclos) para un periodo estacional de {seasonal_periods}.")
-            
-            fit = ExponentialSmoothing(
-                y_train, 
-                seasonal_periods=seasonal_periods, 
-                trend=trend_type, 
-                seasonal=seasonal_type, 
-                initialization_method="estimated"
-            ).fit(
-                smoothing_level=kwargs.get('alpha'),       # Usar alpha del usuario
-                smoothing_trend=kwargs.get('beta'),        # Usar beta del usuario
-                smoothing_seasonal=kwargs.get('gamma'),    # Usar gamma del usuario
-                optimized=False                            # DESACTIVAR OPTIMIZACIÓN
-            )
-            
-            forecast = fit.predict(start=len(y_train), end=len(y_train) + n_days - 1)
-            mape = calculate_mape(y_train.values, fit.fittedvalues.values)
-            forecast_df = pd.DataFrame({'ds': forecast.index, 'yhat': forecast.values})
+        # Aplicar Métricas después del cálculo del modelo
+        metrics['MAPE'] = calculate_mape(actual, predicted)
+        metrics['MAD (MAE)'] = calculate_mad_mae(actual, predicted)
+        metrics['RMSE'] = calculate_rmse(actual, predicted)
+        metrics['Tracking Signal'] = calculate_tracking_signal(actual, predicted)
         
-        else:
-            return None, "Método no reconocido"
-            
-        # Aseguramos que 'ds' esté en formato datetime para el merge si la indexación lo modificó
-        if 'ds' not in forecast_df.columns:
+        # Aseguramos que 'ds' esté en formato datetime si la indexación lo modificó
+        if forecast_df is not None and 'ds' not in forecast_df.columns:
             forecast_df['ds'] = forecast_df.index
+            
+        return forecast_df, metrics
         
-        return forecast_df, mape
-        
+    except ValueError as ve:
+        return None, {'MAPE': np.nan, 'MAD (MAE)': np.nan, 'RMSE': np.nan, 'Tracking Signal': f"Error: {ve}"}
     except Exception as e:
-        return None, f"Error Statsmodels ({model_type}): {e}"
+        return None, {'MAPE': np.nan, 'MAD (MAE)': np.nan, 'RMSE': np.nan, 'Tracking Signal': f"Error: {e}"}
 
-# --- NUEVA FUNCIÓN PARA EXCEL ---
+# --- FUNCIÓN PARA EXCEL ---
 
 @st.cache_data
-def to_excel_buffer(all_forecasts, df_historical_max_date, y_col_name, mape_results):
+def to_excel_buffer(all_forecasts, df_historical_max_date, y_col_name, all_metrics):
     """
     Crea un archivo Excel en memoria (buffer) con una hoja por cada pronóstico.
     """
@@ -178,26 +231,45 @@ def to_excel_buffer(all_forecasts, df_historical_max_date, y_col_name, mape_resu
     
     for name, forecast_df in all_forecasts.items():
         if forecast_df is not None:
-            # Obtener solo las fechas futuras
             future_data = forecast_df[forecast_df['ds'] > df_historical_max_date].copy()
             
             # Formatear el DataFrame para la hoja de Excel
             data_to_save = future_data[['ds', 'yhat']].copy()
             data_to_save.columns = ['Fecha', f'Demanda_Estimada ({y_col_name})']
             
-            # Para Prophet, incluir intervalos de confianza si existen
+            # Incluir intervalos de confianza si existen
             if name == 'Prophet' and 'yhat_lower' in future_data.columns:
                  data_to_save['Límite_Inferior'] = future_data['yhat_lower']
                  data_to_save['Límite_Superior'] = future_data['yhat_upper']
 
-            # Añadir la información del MAPE como primera fila
-            mape_value = mape_results.get(name)
-            if not np.isnan(mape_value):
-                 mape_info = pd.DataFrame({'Fecha': [f'Error %MAPE: {mape_value:.2f}%'], 'Demanda_Estimada ({y_col_name})': [''], 'Límite_Inferior': [''], 'Límite_Superior': ['']})
-            else:
-                 mape_info = pd.DataFrame({'Fecha': [f'Error %MAPE: No calculado'], 'Demanda_Estimada ({y_col_name})': [''], 'Límite_Inferior': [''], 'Límite_Superior': ['']})
-                 
-            data_to_save = pd.concat([mape_info.head(1), data_to_save], ignore_index=True)
+            # Añadir la información de las métricas como primera fila
+            metrics_dict = all_metrics.get(name, {})
+            
+            # Crear la fila de resumen de métricas
+            rows_list = []
+            for metric, value in metrics_dict.items():
+                if isinstance(value, (float, np.float64)) and not np.isnan(value):
+                    formatted_value = f"{value:.2f}"
+                    if metric == 'MAPE':
+                        formatted_value += '%'
+                    
+                    rows_list.append(
+                        pd.DataFrame({'Fecha': [f'{metric}: {formatted_value}'], 
+                                      'Demanda_Estimada ({y_col_name})': [''], 
+                                      'Límite_Inferior': [''], 
+                                      'Límite_Superior': ['']})
+                    )
+                elif isinstance(value, str) and value.startswith("Error"):
+                     rows_list.append(
+                        pd.DataFrame({'Fecha': [f'{metric}: {value}'], 
+                                      'Demanda_Estimada ({y_col_name})': [''], 
+                                      'Límite_Inferior': [''], 
+                                      'Límite_Superior': ['']})
+                    )
+
+            if rows_list:
+                metrics_info = pd.concat(rows_list)
+                data_to_save = pd.concat([metrics_info, data_to_save], ignore_index=True)
             
             # Escribir la hoja
             sheet_name = name.replace(' ', '_').replace('-', '_')
@@ -269,17 +341,17 @@ with st.sidebar:
                 st.subheader("Horizonte")
                 n_days = st.slider("Días a Pronosticar:", min_value=7, max_value=365, value=90, step=7)
                 
-                st.subheader("Parámetros de Suavizado ($\alpha, \beta, \gamma$)")
+                st.subheader("Parámetros de Suavizado (α, β, γ)")
                 st.markdown("Ajuste los coeficientes: $\\alpha$ (Nivel), $\\beta$ (Tendencia), $\\gamma$ (Estacionalidad).")
 
                 # Parámetros para SES, Holt y Winter
-                alpha = st.slider("Smoothing Level ($\alpha$):", min_value=0.01, max_value=0.99, value=0.2, step=0.01)
+                alpha = st.slider("Smoothing Level (α):", min_value=0.01, max_value=0.99, value=0.2, step=0.01)
 
                 # Parámetros para Holt y Winter
-                beta = st.slider("Smoothing Trend ($\beta$):", min_value=0.01, max_value=0.99, value=0.1, step=0.01)
+                beta = st.slider("Smoothing Trend (β):", min_value=0.01, max_value=0.99, value=0.1, step=0.01)
 
                 # Parámetros para Holt-Winters
-                gamma = st.slider("Smoothing Seasonal ($\gamma$):", min_value=0.01, max_value=0.99, value=0.1, step=0.01)
+                gamma = st.slider("Smoothing Seasonal (γ):", min_value=0.01, max_value=0.99, value=0.1, step=0.01)
                 
                 st.subheader("Opciones Específicas")
                 
@@ -303,90 +375,95 @@ if df is not None and not df.empty:
     if st.button("Generar y Comparar Pronósticos (6 Métodos)"):
         
         all_forecasts = {}
-        mape_results = {}
+        all_metrics = {}
         
         # 1. Prophet
         st.info("Calculando Prophet (con Precio como Regresor)...")
-        prophet_forecast, prophet_mape = run_prophet(df_train, df, n_days, regressor_col)
-        if isinstance(prophet_mape, str): st.error(prophet_mape)
+        prophet_forecast, prophet_metrics = run_prophet(df_train, df, n_days, regressor_col)
         all_forecasts['Prophet'] = prophet_forecast
-        mape_results['Prophet'] = prophet_mape
+        all_metrics['Prophet'] = prophet_metrics
+        if isinstance(prophet_metrics.get('Tracking Signal'), str): st.error(prophet_metrics['Tracking Signal'])
         
         # 2. Promedio Móvil
         st.info("Calculando Promedio Móvil...")
-        ma_forecast, ma_mape = run_statsmodels(df_train, n_days, 'Moving Average', window=window_ma)
-        if isinstance(ma_mape, str): st.error(ma_mape)
+        ma_forecast, ma_metrics = run_statsmodels(df_train, n_days, 'Moving Average', window=window_ma)
         all_forecasts['Promedio Móvil'] = ma_forecast
-        mape_results['Promedio Móvil'] = ma_mape
+        all_metrics['Promedio Móvil'] = ma_metrics
+        if isinstance(ma_metrics.get('Tracking Signal'), str): st.error(ma_metrics['Tracking Signal'])
         
         # 3. Suavizado Exponencial Simple (SES)
         st.info("Calculando SES...")
-        ses_forecast, ses_mape = run_statsmodels(df_train, n_days, 'SES', alpha=alpha)
-        if isinstance(ses_mape, str): st.error(ses_mape)
+        ses_forecast, ses_metrics = run_statsmodels(df_train, n_days, 'SES', alpha=alpha)
         all_forecasts['SES'] = ses_forecast
-        mape_results['SES'] = ses_mape
+        all_metrics['SES'] = ses_metrics
+        if isinstance(ses_metrics.get('Tracking Signal'), str): st.error(ses_metrics['Tracking Signal'])
 
         # 4. Holt (Tendencia)
         st.info("Calculando Holt...")
-        holt_forecast, holt_mape = run_statsmodels(df_train, n_days, 'Holt', alpha=alpha, beta=beta)
-        if isinstance(holt_mape, str): st.error(holt_mape)
+        holt_forecast, holt_metrics = run_statsmodels(df_train, n_days, 'Holt', alpha=alpha, beta=beta)
         all_forecasts['Holt'] = holt_forecast
-        mape_results['Holt'] = holt_mape
+        all_metrics['Holt'] = holt_metrics
+        if isinstance(holt_metrics.get('Tracking Signal'), str): st.error(holt_metrics['Tracking Signal'])
         
         # 5. Holt-Winters Aditivo
         st.info("Calculando Holt-Winters Aditivo...")
-        winter_add_forecast, winter_add_mape = run_statsmodels(
+        winter_add_forecast, winter_add_metrics = run_statsmodels(
             df_train, n_days, 'Winter_Add', 
             seasonal_periods=seasonal_periods, trend_type=trend_type, 
             alpha=alpha, beta=beta, gamma=gamma
         )
-        if isinstance(winter_add_mape, str) and "Faltan datos" in winter_add_mape: 
-            st.warning(f"⚠️ **Error en Winter Aditivo:** {winter_add_mape} Por favor, ajusta los Periodos Estacionales o usa más datos de entrenamiento.")
-            winter_add_mape = np.nan # Para que no aparezca en la tabla como error de cadena
-        elif isinstance(winter_add_mape, str): 
-            st.error(winter_add_mape)
-            winter_add_mape = np.nan
-            
         all_forecasts['Winter Aditivo'] = winter_add_forecast
-        mape_results['Winter Aditivo'] = winter_add_mape
-        
+        all_metrics['Winter Aditivo'] = winter_add_metrics
+        if isinstance(winter_add_metrics.get('Tracking Signal'), str) and "Faltan datos" in winter_add_metrics['Tracking Signal']: 
+            st.warning(f"⚠️ **Error en Winter Aditivo:** {winter_add_metrics['Tracking Signal']} Por favor, ajusta los Periodos Estacionales o usa más datos de entrenamiento.")
+        elif isinstance(winter_add_metrics.get('Tracking Signal'), str): 
+            st.error(winter_add_metrics['Tracking Signal'])
+            
         # 6. Holt-Winters Multiplicativo
         st.info("Calculando Holt-Winters Multiplicativo...")
-        winter_mul_forecast, winter_mul_mape = run_statsmodels(
+        winter_mul_forecast, winter_mul_metrics = run_statsmodels(
             df_train, n_days, 'Winter_Mult', 
             seasonal_periods=seasonal_periods, trend_type=trend_type, 
             alpha=alpha, beta=beta, gamma=gamma
         )
-        if isinstance(winter_mul_mape, str) and "Faltan datos" in winter_mul_mape: 
-            st.warning(f"⚠️ **Error en Winter Multiplicativo:** {winter_mul_mape} Por favor, ajusta los Periodos Estacionales o usa más datos de entrenamiento.")
-            winter_mul_mape = np.nan
-        elif isinstance(winter_mul_mape, str): 
-            st.error(winter_mul_mape)
-            winter_mul_mape = np.nan
-            
         all_forecasts['Winter Multiplicativo'] = winter_mul_forecast
-        mape_results['Winter Multiplicativo'] = winter_mul_mape
-        
+        all_metrics['Winter Multiplicativo'] = winter_mul_metrics
+        if isinstance(winter_mul_metrics.get('Tracking Signal'), str) and "Faltan datos" in winter_mul_metrics['Tracking Signal']: 
+            st.warning(f"⚠️ **Error en Winter Multiplicativo:** {winter_mul_metrics['Tracking Signal']} Por favor, ajusta los Periodos Estacionales o usa más datos de entrenamiento.")
+        elif isinstance(winter_mul_metrics.get('Tracking Signal'), str): 
+            st.error(winter_mul_metrics['Tracking Signal'])
+            
         st.success("¡Todos los pronósticos generados!")
         
-        # --- TABLA RESUMEN DE ERRORES (MAPE%) ---
+        # --- TABLA RESUMEN DE ERRORES ---
         
-        st.header("5. Tabla Resumen de Error (%MAPE)")
+        st.header("5. Tabla Resumen de Error (Métricas)")
         
-        # Crear DataFrame de MAPE
-        df_mape = pd.DataFrame.from_dict(mape_results, orient='index', columns=['Error %MAPE'])
+        # Crear DataFrame de Métricas
+        data = {model: {k: v for k, v in metrics.items() if not isinstance(v, str)} 
+                for model, metrics in all_metrics.items()}
+        df_metrics = pd.DataFrame.from_dict(data, orient='index')
         
-        # Eliminar las filas donde el cálculo no se pudo realizar (MAPE es np.nan)
-        df_mape = df_mape.dropna() 
+        # Formatear y añadir descripciones
+        df_metrics['Error %MAPE'] = df_metrics['MAPE'].map('{:.2f}%'.format)
+        df_metrics['MAD (MAE)'] = df_metrics['MAD (MAE)'].map('{:.2f}'.format)
+        df_metrics['RMSE'] = df_metrics['RMSE'].map('{:.2f}'.format)
+        df_metrics['Tracking Signal (Sesgo)'] = df_metrics['Tracking Signal'].map('{:.2f}'.format)
         
-        # Ordenar y formatear
-        df_mape = df_mape.sort_values(by='Error %MAPE', ascending=True)
-        df_mape['Error %MAPE'] = df_mape['Error %MAPE'].map('{:.2f}%'.format)
+        # Seleccionar y reordenar las columnas a mostrar
+        df_metrics = df_metrics[['Error %MAPE', 'MAD (MAE)', 'RMSE', 'Tracking Signal (Sesgo)']]
 
-        st.markdown("**Métrica usada: Mean Absolute Percentage Error (MAPE)**, calculado sobre los datos de entrenamiento. *El valor más bajo es el mejor.*")
-        st.dataframe(df_mape, use_container_width=True)
+        st.markdown(
+            """
+            - **MAPE (%):** Error porcentual promedio. **Más bajo es mejor.**
+            - **MAD (MAE):** Error promedio en las unidades de la demanda. **Más bajo es mejor.**
+            - **RMSE:** Error que penaliza más los errores grandes. En unidades de la demanda. **Más bajo es mejor.**
+            - **Tracking Signal (TS):** Mide el sesgo. Valores entre -4 y +4 son aceptables. **TS > 4 indica subestimación; TS < -4 indica sobreestimación.**
+            """
+        )
+        st.dataframe(df_metrics, use_container_width=True)
 
-        # --- GRÁFICO DE COMPARACIÓN ---
+        # --- GRÁFICO DE COMPARACIÓN (Se mantiene sin cambios) ---
         
         st.header("6. Comparación Gráfica de Pronósticos")
         
@@ -400,11 +477,9 @@ if df is not None and not df.empty:
         i = 0
         for name, forecast_df in all_forecasts.items():
             if forecast_df is not None:
-                # Obtener solo las fechas futuras
                 future_dates = forecast_df[forecast_df['ds'] > df['ds'].max()]
                 
-                # Usar el MAPE calculado
-                mape_value = mape_results.get(name)
+                mape_value = all_metrics.get(name, {}).get('MAPE')
                 mape_label = f' ({mape_value:.2f}%)' if not np.isnan(mape_value) else ' (N/A)'
                 
                 fig.add_trace(go.Scatter(
@@ -429,7 +504,8 @@ if df is not None and not df.empty:
         st.header("7. Descarga de Resultados")
         
         # Generar el archivo Excel en un buffer
-        excel_data = to_excel_buffer(all_forecasts, df['ds'].max(), y_col, mape_results)
+        # ¡IMPORTANTE!: Se pasa 'all_metrics' en lugar de 'mape_results'
+        excel_data = to_excel_buffer(all_forecasts, df['ds'].max(), y_col, all_metrics) 
         
         st.download_button(
             label="Descargar Pronósticos (Excel 6 Hojas) 📥",
