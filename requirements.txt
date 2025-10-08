@@ -1,8 +1,8 @@
 streamlit
 pandas
+numpy
 prophet
 matplotlib
 plotly
 openpyxl
 statsmodels
-numpy
