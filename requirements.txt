@@ -3,4 +3,6 @@ pandas
 prophet
 matplotlib
 plotly
-openpyxl # ¡Nuevo!
+openpyxl
+statsmodels
+numpy
