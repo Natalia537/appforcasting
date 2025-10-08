@@ -443,4 +443,3 @@ if df is not None and not df.empty:
     
 else:
     st.info("Por favor, sube un archivo y asigna las columnas en la barra lateral para comenzar. Asegúrate de tener al menos dos ciclos estacionales (ej. 14 días si usas estacionalidad semanal) para los modelos de Holt-Winters.")
-```
