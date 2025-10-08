@@ -1,3 +1,12 @@
+¡Claro\! Generar un archivo Excel con una hoja por cada método de pronóstico es una excelente manera de entregar los resultados de forma organizada.
+
+He modificado el código de **`app.py`** para que, después de generar los pronósticos, se cree un **botón de descarga** que genera un archivo Excel (`.xlsx`) con las 6 hojas de datos de pronóstico (solo las fechas futuras).
+
+## 💾 Archivo `app.py` Actualizado (Generación de Excel)
+
+Los cambios se concentran en una nueva función llamada `to_excel_buffer` y en la sección del botón de descarga.
+
+```python
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -165,6 +174,47 @@ def run_statsmodels(df_train, n_days, model_type, **kwargs):
         
     except Exception as e:
         return None, f"Error Statsmodels ({model_type}): {e}"
+
+# --- NUEVA FUNCIÓN PARA EXCEL ---
+
+@st.cache_data
+def to_excel_buffer(all_forecasts, df_historical_max_date, y_col_name, mape_results):
+    """
+    Crea un archivo Excel en memoria (buffer) con una hoja por cada pronóstico.
+    """
+    output = io.BytesIO()
+    writer = pd.ExcelWriter(output, engine='xlsxwriter', datetime_format='yyyy-mm-dd')
+    
+    for name, forecast_df in all_forecasts.items():
+        if forecast_df is not None:
+            # Obtener solo las fechas futuras
+            future_data = forecast_df[forecast_df['ds'] > df_historical_max_date].copy()
+            
+            # Formatear el DataFrame para la hoja de Excel
+            data_to_save = future_data[['ds', 'yhat']].copy()
+            data_to_save.columns = ['Fecha', f'Demanda_Estimada ({y_col_name})']
+            
+            # Para Prophet, incluir intervalos de confianza si existen
+            if name == 'Prophet' and 'yhat_lower' in future_data.columns:
+                 data_to_save['Límite_Inferior'] = future_data['yhat_lower']
+                 data_to_save['Límite_Superior'] = future_data['yhat_upper']
+
+            # Añadir la información del MAPE como primera fila
+            mape_value = mape_results.get(name)
+            if not np.isnan(mape_value):
+                 mape_info = pd.DataFrame({'Fecha': [f'Error %MAPE: {mape_value:.2f}%'], 'Demanda_Estimada ({y_col_name})': [''], 'Límite_Inferior': [''], 'Límite_Superior': ['']})
+            else:
+                 mape_info = pd.DataFrame({'Fecha': [f'Error %MAPE: No calculado'], 'Demanda_Estimada ({y_col_name})': [''], 'Límite_Inferior': [''], 'Límite_Superior': ['']})
+                 
+            data_to_save = pd.concat([mape_info.head(1), data_to_save], ignore_index=True)
+            
+            # Escribir la hoja
+            sheet_name = name.replace(' ', '_').replace('-', '_')
+            data_to_save.to_excel(writer, sheet_name=sheet_name[:31], index=False, startrow=0)
+            
+    writer.close()
+    processed_data = output.getvalue()
+    return processed_data
 
 # --- Sidebar para Carga y Configuración de Datos ---
 
@@ -383,8 +433,23 @@ if df is not None and not df.empty:
             height=600
         )
         st.plotly_chart(fig, use_container_width=True)
+
+        # --- BOTÓN DE DESCARGA DE EXCEL ---
+        st.header("7. Descarga de Resultados")
+        
+        # Generar el archivo Excel en un buffer
+        excel_data = to_excel_buffer(all_forecasts, df['ds'].max(), y_col, mape_results)
+        
+        st.download_button(
+            label="Descargar Pronósticos (Excel 6 Hojas) 📥",
+            data=excel_data,
+            file_name=f'pronostico_comparativo_{datetime.date.today()}.xlsx',
+            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            help='Descarga un archivo Excel con una hoja para el pronóstico futuro de cada método.'
+        )
         
     st.divider()
     
 else:
     st.info("Por favor, sube un archivo y asigna las columnas en la barra lateral para comenzar. Asegúrate de tener al menos dos ciclos estacionales (ej. 14 días si usas estacionalidad semanal) para los modelos de Holt-Winters.")
+```
