@@ -1,12 +1,3 @@
-¡Claro\! Generar un archivo Excel con una hoja por cada método de pronóstico es una excelente manera de entregar los resultados de forma organizada.
-
-He modificado el código de **`app.py`** para que, después de generar los pronósticos, se cree un **botón de descarga** que genera un archivo Excel (`.xlsx`) con las 6 hojas de datos de pronóstico (solo las fechas futuras).
-
-## 💾 Archivo `app.py` Actualizado (Generación de Excel)
-
-Los cambios se concentran en una nueva función llamada `to_excel_buffer` y en la sección del botón de descarga.
-
-```python
 import streamlit as st
 import pandas as pd
 import numpy as np
